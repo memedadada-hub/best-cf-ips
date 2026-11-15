@@ -1,0 +1,87 @@
+name: Update Best CF IPs
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # 每6小时运行一次
+  workflow_dispatch: # 手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  update-ips:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Download and run CloudflareSpeedTest
+      run: |
+        wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.4/cfst_linux_amd64.tar.gz || wget -N https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.4/CloudflareST_linux_amd64.tar.gz
+        tar -zxf *.tar.gz
+        BIN=$(ls cfst CloudflareST 2>/dev/null | head -n 1)
+        chmod +x "$BIN"
+        ./"$BIN" -tl 200 -dn 10 -dt 10 -o result.csv -url https://speed.cloudflare.com/__down?bytes=20000000
+        ls -la
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Build top lists
+      run: |
+        python3 - <<'PYEOF'
+        import csv, re
+        from datetime import datetime, timezone
+
+        COLO = {
+            'HKG': ('HK', '🇭🇰'), 'MFM': ('MO', '🇲🇴'), 'TPE': ('TW', '🇹🇼'),
+            'NRT': ('JP', '🇯🇵'), 'KIX': ('JP', '🇯🇵'), 'ICN': ('KR', '🇰🇷'),
+            'SIN': ('SG', '🇸🇬'), 'BKK': ('TH', '🇹🇭'), 'KUL': ('MY', '🇲🇾'),
+            'LAX': ('US', '🇺🇸'), 'SJC': ('US', '🇺🇸'), 'SEA': ('US', '🇺🇸'),
+            'SFO': ('US', '🇺🇸'), 'ORD': ('US', '🇺🇸'), 'DFW': ('US', '🇺🇸'),
+            'IAD': ('US', '🇺🇸'), 'MIA': ('US', '🇺🇸'), 'ATL': ('US', '🇺🇸'),
+            'LHR': ('GB', '🇬🇧'), 'FRA': ('DE', '🇩🇪'), 'AMS': ('NL', '🇳🇱'),
+            'CDG': ('FR', '🇫🇷'), 'MAD': ('ES', '🇪🇸'), 'MXP': ('IT', '🇮🇹'),
+            'SYD': ('AU', '🇦🇺'), 'AKL': ('NZ', '🇳🇿'), 'YYZ': ('CA', '🇨🇦'),
+            'GRU': ('BR', '🇧🇷'),
+        }
+
+        rows = []
+        with open('result.csv', newline='', encoding='utf-8') as f:
+            for row in csv.reader(f):
+                if not row or not re.match(r'^\d+\.\d+\.\d+\.\d+$', row[0].strip()):
+                    continue
+                ip = row[0].strip()
+                loss = float(row[3].strip().rstrip('%')) if len(row) > 3 else 0
+                latency = float(row[4]) if len(row) > 4 else 9999
+                colo = row[6].strip() if len(row) > 6 else ''
+                rows.append((ip, loss, latency, colo))
+
+        rows = [r for r in rows if r[1] == 0]
+        rows.sort(key=lambda r: r[2])
+
+        now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')
+        for n in (20, 50, 100, 200, 400):
+            top = rows[:n]
+            with open(f'best-cf-ip-scanned-top{n}.txt', 'w', encoding='utf-8') as f:
+                f.write(f'# {len(top)} best ips scanned at {now}\n')
+                for ip, loss, latency, colo in top:
+                    cc, flag = COLO.get(colo, ('', ''))
+                    tag = f'#{cc} {flag}' if cc else ''
+                    f.write(f'{ip}:443{tag}\n')
+        print(f'done, {len(rows)} clean ips')
+        PYEOF
+
+    - name: Commit and push changes
+      run: |
+        git config --global user.email "tianshideyou@proton.me"
+        git config --global user.name "tianshipapa"
+        if [ -n "$(git status --porcelain)" ]; then
+          git add best-cf-ip-scanned-top20.txt best-cf-ip-scanned-top50.txt best-cf-ip-scanned-top100.txt best-cf-ip-scanned-top200.txt best-cf-ip-scanned-top400.txt
+          git commit -m "Automatic update"
+          git push
+        else
+          echo "No changes detected, skipping commit."
+        fi
